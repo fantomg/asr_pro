@@ -1,69 +1,86 @@
-import asrpy
+import matplotlib
+import matplotlib.pyplot as plt
 import mne
 
-from plot.waveform import plot_evoked_joint
-
-# 输入的原始 EEG 数据文件路径
-input_file = './BCICIV_2a_labeled/A02E_raw.fif'
-output_file = './BCICIV_2a_processed/A02E_asr.fif'
+# 设置 Matplotlib 后端为 TkAgg
+matplotlib.use('TkAgg')
 
 
-def apply_asr(raw_data):
+def compare_preprocessing(raw_path, clean_path, tmin=2, tmax=6,
+                          baseline=None, figsize=(12, 6)):
     """
-    使用 asrpy 库进行伪影去除
-    :param raw_data: 输入的原始 EEG 数据
-    :return: 经过 ASR 处理后的 EEG 数据
+    预处理对比可视化函数
+
+    参数：
+    raw_path : str
+        原始数据路径
+    clean_path : str
+        预处理后数据路径
+    tmin/tmax : float
+        时窗范围（秒）
+    baseline : tuple or None
+        基线校正时段
+    figsize : tuple
+        图像尺寸
     """
-    # 创建 ASR 对象，设置采样率和截止频率
-    asr = asrpy.ASR(sfreq=raw_data.info['sfreq'], cutoff=20)  # 设置采样率和截止频率
+    # 加载数据
+    raw = mne.io.read_raw_fif(raw_path, preload=True)
+    clean = mne.io.read_raw_fif(clean_path, preload=True)
 
-    # 适应数据并应用 ASR 进行伪影去除
-    asr.fit(raw_data)  # 适配数据
-    raw_cleaned = asr.transform(raw_data)  # 伪影去除
+    # 事件提取
+    events_raw, eventid_raw = mne.events_from_annotations(raw)
+    events_clean, eventid_clean = mne.events_from_annotations(clean)
 
-    return raw_cleaned
+    # 过滤有效事件ID
+    common_event_ids = {k: v for k, v in eventid_raw.items() if k in eventid_clean}
+
+    # 创建epochs
+    epochs_raw = mne.Epochs(raw, events_raw, event_id=common_event_ids,
+                            tmin=tmin, tmax=tmax, baseline=baseline,
+                            preload=True, event_repeated='merge')
+    epochs_clean = mne.Epochs(clean, events_clean, event_id=common_event_ids,
+                              tmin=tmin, tmax=tmax, baseline=baseline,
+                              preload=True, event_repeated='merge')
+
+    # 生成 evoked 数据
+    evoked_raw = epochs_raw.average()
+    evoked_clean = epochs_clean.average()
+
+    # 创建对比图
+    fig, axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
+
+    # 绘制原始数据波形
+    evoked_raw.plot(axes=axes[0], show=False, spatial_colors=True,
+                    zorder='std', time_unit='s')
+    axes[0].set_title("Raw Data", fontweight='bold')
+
+    # **获取原始数据 y 轴范围**
+    raw_ylim = axes[0].get_ylim()
+
+    # 绘制预处理后波形
+    evoked_clean.plot(axes=axes[1], show=False, spatial_colors=True,
+                      zorder='std', time_unit='s')
+    axes[1].set_title("Preprocessed Data", fontweight='bold')
+
+    # **应用相同 y 轴范围**
+    axes[1].set_ylim(raw_ylim)
+
+    plt.tight_layout()
+    plt.show()
+    return fig
 
 
-def main():
-    channel_names = [
-        'Fz', 'FC3', 'FC1', 'FCz', 'FC2', 'FC4',
-        'C5', 'C3', 'C1', 'Cz', 'C2', 'C4', 'C6',
-        'CP3', 'CP1', 'CPz', 'CP2', 'CP4',
-        'P1', 'Pz', 'P2', 'POz'
-    ]
-    # 读取原始 EEG 数据
-    raw = mne.io.read_raw_fif(input_file, preload=True)
-    # Get the event times and their corresponding identifiers
-    events, events_id = mne.events_from_annotations(raw)
+# 使用示例
+if __name__ == '__main__':
+    raw_file = './BCICIV_2a_labeled/A08E_raw.fif'
+    clean_file = './clean/A08E_pro_eeg.fif'
 
-    # Create an MNE Epochs object containing the selected data
-    epochs = mne.Epochs(raw, events, events_id, tmin=3, tmax=5.9, proj=True, baseline=None, preload=True,
-                        picks=channel_names, event_repeated='drop')
-    # 查看原始数据的一些基本信息
-    print(f"原始数据的基本信息：{raw.info}")
-
-    # 应用 ASR 进行伪影去除
-    raw_cleaned = apply_asr(raw)
-    events, events_id = mne.events_from_annotations(raw_cleaned)
-    cleaned_avg = mne.Epochs(raw_cleaned, events, events_id, tmin=3, tmax=5.9, proj=True, baseline=None, preload=True,
-                             picks=channel_names, event_repeated="drop")
-    plot_evoked_joint(
-        cleaned_avg,
-        epochs,
-        times="peaks",
-        title=None,
-        picks=channel_names,
-        exclude=None,
-        show=True,
+    # 执行对比
+    compare_preprocessing(
+        raw_path=raw_file,
+        clean_path=clean_file,
+        tmin=2,
+        tmax=5.9,
+        baseline=None,
+        figsize=(12, 6)
     )
-    # 查看处理后的数据的一些基本信息
-    print(f"处理后的数据的基本信息：{raw_cleaned.info}")
-
-    # 保存处理后的数据到新的文件
-    raw_cleaned.save(output_file, overwrite=True)
-
-    print(f"处理后的数据已保存到：{output_file}")
-
-
-if __name__ == "__main__":
-    main()

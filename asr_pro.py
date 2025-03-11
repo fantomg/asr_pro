@@ -1,120 +1,21 @@
-# Authors:  Dirk Gütlin <dirk.guetlin@gmail.com>
-#           Nicolas Barascud
-#
-# License: BSD (3-clause)
-"""
-In asrpy.asr you can find the original ASR functions (similar to MATLAB)
-as well as a high-level ASR object ready to use with MNE-Python raw data.
-"""
 import logging
 import warnings
 
 import numpy as np
 from numpy.linalg import pinv
 from scipy import linalg
+from scipy.signal import lfilter
 
 from origin_asrpy_utils import (geometric_median, fit_eeg_distribution, yulewalk,
                                 yulewalk_filter, ma_filter, block_covariance)
+import numpy as np
+from scipy.linalg import pinv, eigh
+import warnings
+
+from joblib import Parallel, delayed
 
 
 class ASR():
-    """Artifact Subspace Reconstruction.
-
-    Artifact subspace reconstruction (ASR) is an automated, online,
-    component-based artifact removal method for removing transient or
-    large-amplitude artifacts in multi-channel EEG recordings [1]_.
-
-    Parameters
-    ----------
-    sfreq : float
-        Sampling rate of the data, in Hz.
-    cutoff: float
-        Standard deviation cutoff for rejection. X portions whose variance
-        is larger than this threshold relative to the calibration data are
-        considered missing data and will be removed. The most aggressive value
-        that can be used without losing too much EEG is 2.5. Recommended to
-        use with more conservative values ranging from 20 - 30.
-        Defaults to 20.
-    blocksize : int
-        Block size for calculating the robust data covariance and thresholds,
-        in samples; allows to reduce the memory and time requirements of the
-        robust estimators by this factor (down to Channels x Channels x Samples
-        x 16 / Blocksize bytes) (default=100).
-    win_len : float
-        Window length (s) that is used to check the data for artifact content.
-        This is ideally as long as the expected time scale of the artifacts but
-        not shorter than half a cycle of the high-pass filter that was used
-        (default=0.5).
-    win_overlap : float
-        Window overlap fraction. The fraction of two successive windows that
-        overlaps. Higher overlap ensures that fewer artifact portions are going
-        to be missed, but is slower (default=0.66).
-    max_dropout_fraction : float
-        Maximum fraction of windows that can be subject to signal dropouts
-        (e.g., sensor unplugged), used for threshold estimation (default=0.1).
-    min_clean_fraction : float
-        Minimum fraction of windows that need to be clean, used for threshold
-        estimation (default=0.25).
-    ab : 2-tuple | None
-        Coefficients (A, B) of an IIR filter that is used to shape the
-        spectrum of the signal when calculating artifact statistics. The
-        output signal does not go through this filter. This is an optional way
-        to tune the sensitivity of the algorithm to each frequency component
-        of the signal. The default filter is less sensitive at alpha and beta
-        frequencies and more sensitive at delta (blinks) and gamma (muscle)
-        frequencies. Defaults to None.
-    max_bad_chans : float
-        The maximum number or fraction of bad channels that a retained window
-        may still contain (more than this and it is removed). Reasonable range
-        is 0.05 (very clean output) to 0.3 (very lax cleaning of only coarse
-        artifacts) (default=0.2).
-    method : {'riemann', 'euclid'}
-        Method to use. If riemann, use the riemannian-modified version of
-        ASR [2]_. Currently, only euclidean ASR is supported. Defaults to
-        "euclid".
-
-    Attributes
-    ----------
-    sfreq: array, shape=(n_channels, filter_order)
-        Filter initial conditions.
-    cutoff: float
-        Standard deviation cutoff for rejection.
-    blocksize : int
-        Block size for calculating the robust data covariance and thresholds.
-    win_len : float
-        Window length (s) that is used to check the data for artifact content.
-    win_overlap : float
-        Window overlap fraction.
-    max_dropout_fraction : float
-        Maximum fraction of windows that can be subject to signal dropouts.
-    min_clean_fraction : float
-        Minimum fraction of windows.
-    max_bad_chans : float
-        The maximum fraction of bad channels.
-    method : {'riemann', 'euclid'}
-        Method to use.
-    A, B: arrays
-        Coefficients of an IIR filter that is used to shape the spectrum of the
-        signal when calculating artifact statistics. The output signal does not
-        go through this filter. This is an optional way to tune the sensitivity
-        of the algorithm to each frequency component of the signal. The default
-        filter is less sensitive at alpha and beta frequencies and more
-        sensitive at delta (blinks) and gamma (muscle) frequencies.
-    M : array, shape=(channels, channels)
-        The mixing matrix to fit ASR data.
-    T : array, shape=(channels, channels)
-        The mixing matrix to fit ASR data.
-
-    References
-    ----------
-    .. [1] Kothe, C. A. E., & Jung, T. P. (2016). U.S. Patent Application No.
-       14/895,440. https://patents.google.com/patent/US20160113587A1/en
-    .. [2] Blum, S., Jacobsen, N. S. J., Bleichner, M. G., & Debener, S.
-       (2019). A Riemannian Modification of Artifact Subspace Reconstruction
-       for EEG Artifact Handling. Frontiers in Human Neuroscience, 13.
-       https://doi.org/10.3389/fnhum.2019.00141
-
-    """
 
     def __init__(self, sfreq, cutoff=20, blocksize=100, win_len=0.5,
                  win_overlap=0.66, max_dropout_fraction=0.1,
@@ -160,61 +61,6 @@ class ASR():
 
     def fit(self, raw, picks="eeg", start=0, stop=None,
             return_clean_window=False):
-        """Calibration for the Artifact Subspace Reconstruction method.
-
-        The input to this data is a multi-channel time series of calibration
-        data. In typical uses the calibration data is clean resting EEG data
-        of data if the fraction of artifact content is below the breakdown
-        point of the robust statistics used for estimation (50% theoretical,
-        ~30% practical). If the data has a proportion of more than 30-50%
-        artifacts then bad time windows should be removed beforehand. This
-        data is used to estimate the thresholds that are used by the ASR
-        processing function to identify and remove artifact components.
-
-        The calibration data must have been recorded for the same cap design
-        from which data for cleanup will be recorded, and ideally should be
-        from the same session and same subject, but it is possible to reuse
-        the calibration data from a previous session and montage to the
-        extent that the cap is placed in the same location (where loss in
-        accuracy is more or less proportional to the mismatch in cap
-        placement).
-
-        Parameters
-        ----------
-        raw : instance of mne.io.Raw
-            Instance of mne.io.Raw to be used for fitting the ASR.
-            The calibration data should have been high-pass filtered (for
-            example at 0.5Hz or 1Hz using a Butterworth IIR filter), and be
-            reasonably clean not less than 30 seconds (this method is
-            typically used with 1 minute or more).
-        picks : str | list | slice | None
-            Channels used to fit the ASR. All channels should be of the same
-            type (e.g. "eeg", "grads"). Slices and lists of integers will
-            be interpreted as channel indices. In lists, channel
-            name strings (e.g., ['MEG0111', 'MEG2623'] will pick the given
-            channels. Note that channels in info['bads'] will be included if
-            their names or indices are explicitly provided. Defaults to "eeg".
-        start : int
-            The first sample to use for fitting the data. Defaults to 0.
-        stop : int | None
-            The last sample to use for fitting the data. If `None`, all
-            samples after `start` will be used for fitting. Defaults to None.
-        return_clean_window : Bool
-            If True, the method will return the variables `clean` (the cropped
-             dataset which was used to fit the ASR) and `sample_mask` (a
-             logical mask of which samples were included/excluded from fitting
-             the ASR). Defaults to False.
-
-        Returns
-        -------
-        clean : array, shape=(n_channels, n_samples)
-            The cropped version of the dataset which was used to calibrate
-            the ASR. This array is a result of the `clean_windows` function
-            and no ASR was applied to it.
-        sample_mask : boolean array, shape=(1, n_samples)
-            Logical mask of the samples which were used to train the ASR.
-
-        """
 
         # extract the data
         X = raw.get_data(picks=picks, start=start, stop=stop)
@@ -250,167 +96,57 @@ class ASR():
 
     def transform(self, raw, picks="eeg", lookahead=0.25, stepsize=32,
                   maxdims=0.66, return_states=False, mem_splits=3):
-        """Apply Artifact Subspace Reconstruction.
+        """ASR处理（分块版）"""
 
-        Parameters
-        ----------
-        raw : instance of mne.io.Raw
-            Instance of mne.io.Raw to be transformed by the ASR.
-        picks : str | list | slice | None
-            Channels to be transformed by the ASR. Should be the same set of
-            channels as used by `ASR.fit()`. All channels should be of the
-            same type (e.g. "eeg", "grads"). Slices and lists of integers will
-            be interpreted as channel indices. In lists, channel
-            name strings (e.g., ['MEG0111', 'MEG2623'] will pick the given
-            channels. Note that channels in info['bads'] will be included if
-            their names or indices are explicitly provided. Defaults to "eeg".
-        lookahead : float
-            Amount of look-ahead that the algorithm should use (in seconds).
-            This value should be between 0 (no lookahead) and WindowLength/2
-            (optimal lookahead). The recommended value is WindowLength/2.
-            Default: 0.25
-
-            Note: Other than in `asr_process`, the signal will be readjusted
-            to eliminate any temporal jitter and automatically readjust it to
-            the correct time points. Zero-padding will be applied to the last
-            `lookahead` portion of the data, possibly resulting in inaccuracies
-            for the final `lookahead` seconds of the recording.
-        stepsize : int
-            The steps in which the algorithm will be updated. The larger this
-            is, the faster the algorithm will be. The value must not be larger
-            than WindowLength * SamplingRate. The minimum value is 1 (update
-            for every sample) while a good value would be sfreq//3. Note that
-            an update is always performed also on the first and last sample of
-            the data chunk. Default: 32
-        max_dims : float, int
-            Maximum dimensionality of artifacts to remove. This parameter
-            denotes the maximum number of dimensions which can be removed from
-            each segment. If larger than 1, `int(max_dims)` will denote the
-            maximum number of dimensions removed from the data. If smaller
-            than 1, `max_dims` describes a fraction of total dimensions.
-            Defaults to 0.66.
-        return_states : bool
-            If True, returns a dict including the updated states {"M":M,
-            "T":T, "R":R, "Zi":Zi, "cov":cov, "carry":carry}. Defaults to
-            False.
-        mem_splits : int
-            Split the array in `mem_splits` segments to save memory.
-
-        Returns
-        -------
-        out : array, shape=(n_channels, n_samples)
-            Filtered data.
-
-        """
-        # extract the data
         X = raw.get_data(picks=picks)
+        C, N = X.shape
+        P = int(self.sfreq * lookahead)
 
-        # add lookahead padding at the end
-        lookahead_samples = int(self.sfreq * lookahead)
-        X = np.concatenate([X,
-                            np.zeros([X.shape[0], lookahead_samples])],
-                           axis=1)
+        # 末尾填充P个零样本
+        X_padded = np.pad(X, ((0, 0), (0, P)), mode='constant')
 
-        # apply ASR
-        X = asr_process(X, self.sfreq, self.M, self.T, self.win_len,
-                        lookahead, stepsize, maxdims, (self.A, self.B),
-                        self.R, self.Zi, self.cov, self.carry,
-                        return_states, self.method, mem_splits)
+        # 分块处理
+        chunk_size = 10000 + P  # 确保每块足够大
+        X_processed = np.zeros((C, N))
+        self.carry = None  # 重置状态
 
-        # remove lookahead portion from start
-        X = X[:, lookahead_samples:]
+        for start in range(0, N, chunk_size - P):
+            end = min(start + chunk_size, N + P)
+            chunk = X_padded[:, start:end]
 
-        # Return a modifier raw instance
+            processed, states = asr_process_optimized(
+                chunk, self.sfreq, self.M, self.T,
+                windowlen=self.win_len,
+                lookahead=lookahead,
+                stepsize=stepsize,
+                maxdims=maxdims,
+                ab=(self.A, self.B),
+                R=self.R,
+                Zi=self.Zi,
+                cov=self.cov,
+                carry=self.carry,
+                return_states=True,
+                method=self.method,
+                mem_splits=mem_splits,
+                n_jobs=1
+            )
+
+            # 计算有效输出区间
+            output_start = start
+            output_end = output_start + processed.shape[1] - P
+            X_processed[:, output_start:output_end] = processed[:, :-P]
+
+            self.carry = states['carry']
+
+        # 应用处理后的数据
         raw = raw.copy()
-        raw.apply_function(lambda x: X, picks=picks,
-                           channel_wise=False)
+        raw.apply_function(lambda x: X_processed, picks=picks, channel_wise=False)
         return raw
 
 
 def asr_calibrate(X, sfreq, cutoff=20, blocksize=100, win_len=0.5,
                   win_overlap=0.66, max_dropout_fraction=0.1,
                   min_clean_fraction=0.25, ab=None, method='euclid'):
-    """Calibration function for the Artifact Subspace Reconstruction method.
-
-    This function can be used if you inted to apply ASR to a simple numpy
-    array instead of a mne.io.Raw object. It is equivalent to the MATLAB
-    implementation of asr_calibrate (except for some small differences
-    introduced by solvers for the eigenspace functions etc).
-
-    The input to this data is a multi-channel time series of calibration data.
-    In typical uses the calibration data is clean resting EEG data of ca. 1
-    minute duration (can also be longer). One can also use on-task data if the
-    fraction of artifact content is below the breakdown point of the robust
-    statistics used for estimation (50% theoretical, ~30% practical). If the
-    data has a proportion of more than 30-50% artifacts then bad time windows
-    should be removed beforehand. This data is used to estimate the thresholds
-    that are used by the ASR processing function to identify and remove
-    artifact components.
-
-    The calibration data must have been recorded for the same cap design from
-    which data for cleanup will be recorded, and ideally should be from the
-    same session and same subject, but it is possible to reuse the calibration
-    data from a previous session and montage to the extent that the cap is
-    placed in the same location (where loss in accuracy is more or less
-    proportional to the mismatch in cap placement).
-
-    The calibration data should have been high-pass filtered (for example at
-    0.5Hz or 1Hz using a Butterworth IIR filter).
-
-    Parameters
-    ----------
-    X : array, shape=(n_channels, n_samples)
-        *zero-mean* (e.g., high-pass filtered) and reasonably clean EEG of not
-        much less than 30 seconds (this method is typically used with 1 minute
-        or more).
-    sfreq : float
-        Sampling rate of the data, in Hz.
-    cutoff: float
-        Standard deviation cutoff for rejection. X portions whose variance
-        is larger than this threshold relative to the calibration data are
-        considered missing data and will be removed. Defaults to 20
-        (In EEGLab's `clean_rawdata` the original threshold was set to 5, but
-        it is widely recommended to use a value higher than 20).
-    blocksize : int
-        Block size for calculating the robust data covariance and thresholds,
-        in samples; allows to reduce the memory and time requirements of the
-        robust estimators by this factor (down to n_chans x n_chans x
-        n_samples x 16 / blocksize bytes) (default=100).
-    win_len : float
-        Window length that is used to check the data for artifact content.
-        This is ideally as long as the expected time scale of the artifacts
-        but short enough to allow for several 1000 windows to compute
-        statistics over (default=0.5).
-    win_overlap : float
-        Window overlap fraction. The fraction of two successive windows that
-        overlaps. Higher overlap ensures that fewer artifact portions are
-        going to be missed, but is slower (default=0.66).
-    max_dropout_fraction : float
-        Maximum fraction of windows that can be subject to signal dropouts
-        (e.g., sensor unplugged), used for threshold estimation (default=0.1).
-    min_clean_fraction : float
-        Minimum fraction of windows that need to be clean, used for threshold
-        estimation (default=0.25).
-    ab : 2-tuple | None
-        Coefficients (A, B) of an IIR filter that is used to shape the
-        spectrum of the signal when calculating artifact statistics. The
-        output signal does not go through this filter. This is an optional way
-        to tune the sensitivity of the algorithm to each frequency component
-        of the signal. The default filter is less sensitive at alpha and beta
-        frequencies and more sensitive at delta (blinks) and gamma (muscle)
-        frequencies. Defaults to None.
-    method : {'euclid', 'riemann'}
-        Metric to compute the covariance matrix average. For now, only
-        euclidean ASR is supported.
-
-    Returns
-    -------
-    M : array
-        Mixing matrix.
-    T : array
-        Threshold matrix.
-
-    """
     if method == "riemann":
         warnings.warn("Riemannian ASR is not yet supported. Switching back to"
                       " Euclidean ASR.")
@@ -464,262 +200,9 @@ def asr_calibrate(X, sfreq, cutoff=20, blocksize=100, win_len=0.5,
     return M, T
 
 
-def asr_process(data, sfreq, M, T, windowlen=0.5, lookahead=0.25, stepsize=32,
-                maxdims=0.66, ab=None, R=None, Zi=None, cov=None, carry=None,
-                return_states=False, method="euclid", mem_splits=3):
-    """Apply the Artifact Subspace Reconstruction method to a data array.
-
-    This function is used to clean multi-channel signal using the ASR method.
-    The required inputs are the data matrix and the sampling rate of the data.
-
-    `asr_process` can be used if you inted to apply ASR to a simple numpy
-    array instead of a mne.io.Raw object. It is equivalent to the MATLAB
-    implementation of `asr_process` (except for some small differences
-    introduced by solvers for the eigenspace functions etc).
-
-    Parameters
-    ----------
-    data : array, shape=(n_channels, n_samples)
-        Raw data.
-    sfreq : float
-        The sampling rate of the data.
-    M : array, shape=(n_channels, n_channels)
-        The Mixing matrix (as fitted with asr_calibrate).
-    T : array, shape=(n_channels, n_channels)
-        The Threshold matrix (as fitted with asr_calibrate).
-    windowlen : float
-        Window length that is used to check the data for artifact content.
-        This is ideally as long as the expected time scale of the artifacts
-        but short enough to allow for several 1000 windows to compute
-        statistics over (default=0.5).
-    lookahead:
-        Amount of look-ahead that the algorithm should use. Since the
-        processing is causal, the output signal will be delayed by this
-        amount. This value is in seconds and should be between 0 (no
-        lookahead) and WindowLength/2 (optimal lookahead). The recommended
-        value is WindowLength/2. Default: 0.25
-    stepsize:
-        The steps in which the algorithm will be updated. The larger this is,
-        the faster the algorithm will be. The value must not be larger than
-        WindowLength * SamplingRate. The minimum value is 1 (update for every
-        sample) while a good value would be sfreq//3. Note that an update
-        is always performed also on the first and last sample of the data
-        chunk. Default: 32
-    max_dims : float, int
-        Maximum dimensionality of artifacts to remove. This parameter
-        denotes the maximum number of dimensions which can be removed from
-        each segment. If larger than 1, `int(max_dims)` will denote the
-        maximum number of dimensions removed from the data. If smaller than 1,
-        `max_dims` describes a fraction of total dimensions. Defaults to 0.66.
-    ab : 2-tuple | None
-        Coefficients (A, B) of an IIR filter that is used to shape the
-        spectrum of the signal when calculating artifact statistics. The
-        output signal does not go through this filter. This is an optional way
-        to tune the sensitivity of the algorithm to each frequency component
-        of the signal. The default filter is less sensitive at alpha and beta
-        frequencies and more sensitive at delta (blinks) and gamma (muscle)
-        frequencies. Defaults to None.
-    R : array, shape=(n_channels, n_channels)
-        Previous reconstruction matrix. Defaults to None.
-    Zi : array
-        Previous filter conditions. Defaults to None.
-    cov : array, shape=([n_trials, ]n_channels, n_channels) | None
-        Covariance. If None (default), then it is computed from ``X_filt``.
-        If a 3D array is provided, the average covariance is computed from
-        all the elements in it. Defaults to None.
-    carry :
-        Initial portion of the data that will be added to the current data.
-        If None, data will be interpolated. Defaults to None.
-    return_states : bool
-        If True, returns a dict including the updated states {"M":M, "T":T,
-        "R":R, "Zi":Zi, "cov":cov, "carry":carry}. Defaults to False.
-    method : {'euclid', 'riemann'}
-        Metric to compute the covariance matrix average. Currently, only
-        euclidean ASR is supported.
-    mem_splits : int
-        Split the array in `mem_splits` segments to save memory.
-
-
-    Returns
-    -------
-    clean : array, shape=(n_channels, n_samples)
-        Clean data.
-    state : dict
-        Output ASR parameters {"M":M, "T":T, "R":R, "Zi":Zi, "cov":cov,
-        "carry":carry}.
-
-    """
-    if method == "riemann":
-        warnings.warn("Riemannian ASR is not yet supported. Switching back to"
-                      " Euclidean ASR.")
-        method == "euclid"
-
-    # calculate the the actual max dims based on the fraction parameter
-    if maxdims < 1:
-        maxdims = np.round(len(data) * maxdims)
-
-    # set initial filter conditions of none was passed
-    if Zi is None:
-        _, Zi = yulewalk_filter(data, ab=ab, sfreq=sfreq,
-                                zi=np.ones([len(data), 8]))
-
-    # set the number of channels
-    C, S = data.shape
-
-    # set the number of windows
-    N = np.round(windowlen * sfreq).astype(int)
-    P = np.round(lookahead * sfreq).astype(int)
-
-    # interpolate a portion of the data if no buffer was given
-    if carry is None:
-        carry = np.tile(2 * data[:, 0],
-                        (P, 1)).T - data[:, np.mod(np.arange(P, 0, -1), S)]
-    data = np.concatenate([carry, data], axis=-1)
-
-    # splits = np.ceil(C*C*S*8*8 + C*C*8*s/stepsize + C*S*8*2 + S*8*5)...
-    splits = mem_splits  # TODO: use this for parallelization MAKE IT A PARAM FIRST
-
-    # loop over smaller segments of the data (for memory purposes)
-    last_trivial = False
-    last_R = None
-    for i in range(splits):
-
-        # set the current range
-        i_range = np.arange(i * S // splits,
-                            np.min([(i + 1) * S // splits, S]),
-                            dtype=int)
-
-        # filter the current window with yule-walker
-        X, Zi = yulewalk_filter(data[:, i_range + P], sfreq=sfreq,
-                                zi=Zi, ab=ab, axis=-1)
-
-        # compute a moving average covariance
-        Xcov, cov = \
-            ma_filter(N,
-                      np.reshape(np.multiply(np.reshape(X, (1, C, -1)),
-                                             np.reshape(X, (C, 1, -1))),
-                                 (C * C, -1)), cov)
-
-        # set indices at which we update the signal
-        update_at = np.arange(stepsize,
-                              Xcov.shape[-1] + stepsize - 2,
-                              stepsize)
-        update_at = np.minimum(update_at, Xcov.shape[-1]) - 1
-
-        # set the previous reconstruction matrix if none was assigned
-        if last_R is None:
-            update_at = np.concatenate([[0], update_at])
-            last_R = np.eye(C)
-
-        Xcov = np.reshape(Xcov[:, update_at], (C, C, -1))
-
-        # loop through the updating intervals
-        last_n = 0
-        for j in range(len(update_at) - 1):
-
-            # get the eigenvectors/values.For method 'riemann', this should
-            # be replaced with PGA/ nonlinear eigenvalues
-            D, V = np.linalg.eigh(Xcov[:, :, j])
-
-            # determine which components to keep
-            keep = np.logical_or(D < np.sum((T @ V) ** 2, axis=0),
-                                 np.arange(C) + 1 < (C - maxdims))
-            trivial = np.all(keep)
-
-            # set the reconstruction matrix (ie. reconstructing artifact
-            # components using the mixing matrix)
-            if not trivial:
-                inv = pinv(np.multiply(keep[:, np.newaxis], V.T @ M))
-                R = np.real(M @ inv @ V.T)
-            else:
-                R = np.eye(C)
-
-            # apply the reconstruction
-            n = update_at[j] + 1
-            if (not trivial) or (not last_trivial):
-                subrange = i_range[np.arange(last_n, n)]
-
-                # generate a cosine signal
-                blend_x = np.pi * np.arange(1, n - last_n + 1) / (n - last_n)
-                blend = (1 - np.cos(blend_x)) / 2
-
-                # use cosine blending to replace data with reconstructed data
-                tmp_data = data[:, subrange]
-                data[:, subrange] = np.multiply(blend, R @ tmp_data) + \
-                                    np.multiply(1 - blend, last_R @ tmp_data)  # noqa
-
-            # set the parameters for the next iteration
-            last_n, last_R, last_trivial = n, R, trivial
-
-    # assign a new lookahead portion
-    carry = np.concatenate([carry, data[:, -P:]])
-    carry = carry[:, -P:]
-
-    if return_states:
-        return data[:, :-P], {"M": M, "T": T, "R": R, "Zi": Zi,
-                              "cov": cov, "carry": carry}
-    else:
-        return data[:, :-P]
-
-
 def clean_windows(X, sfreq, max_bad_chans=0.2, zthresholds=[-3.5, 5],
                   win_len=.5, win_overlap=0.66, min_clean_fraction=0.25,
                   max_dropout_fraction=0.1):
-    """Remove periods with abnormally high-power content from continuous data.
-
-    This function cuts segments from the data which contain high-power
-    artifacts. Specifically, only windows are retained which have less than a
-    certain fraction of "bad" channels, where a channel is bad in a window if
-    its power is above or below a given upper/lower threshold (in standard
-    deviations from a robust estimate of the EEG power distribution in the
-    channel).
-
-    Parameters
-    ----------
-    X : array, shape=(n_channels, n_samples)
-        Continuous data set, assumed to be appropriately high-passed (e.g. >
-        1Hz or 0.5Hz - 2.0Hz transition band)
-    max_bad_chans : float
-        The maximum number or fraction of bad channels that a retained window
-        may still contain (more than this and it is removed). Reasonable range
-        is 0.05 (very clean output) to 0.3 (very lax cleaning of only coarse
-        artifacts) (default=0.2).
-    zthresholds : 2-tuple
-        The minimum and maximum standard deviations within which the power of
-        a channel must lie (relative to a robust estimate of the clean EEG
-        power distribution in the channel) for it to be considered "not bad".
-        (default=[-3.5, 5]).
-
-    The following are detail parameters that usually do not have to be tuned.
-    If you can't get the function to do what you want, you might consider
-    adapting these to your data.
-
-    win_len : float
-        Window length that is used to check the data for artifact content.
-        This is ideally as long as the expected time scale of the artifacts
-        but not shorter than half a cycle of the high-pass filter that was
-        used. Default: 1.
-    win_overlap : float
-        Window overlap fraction. The fraction of two successive windows that
-        overlaps. Higher overlap ensures that fewer artifact portions are
-        going to be missed, but is slower (default=0.66).
-    min_clean_fraction : float
-        Minimum fraction that needs to be clean. This is the minimum fraction
-        of time windows that need to contain essentially uncontaminated EEG.
-        (default=0.25)
-    max_dropout_fraction : float
-        Maximum fraction that can have dropouts. This is the maximum fraction
-        of time windows that may have arbitrarily low amplitude (e.g., due to
-        the sensors being unplugged) (default=0.1).
-
-    Returns
-    -------
-    clean : array, shape=(n_channels, n_samples)
-        Dataset with bad time periods removed.
-    sample_mask : boolean array, shape=(1, n_samples)
-        Mask of retained samples (logical array).
-
-    """
     assert 0 < max_bad_chans < 1, "max_bad_chans must be a fraction !"
 
     # set internal variables
@@ -753,9 +236,9 @@ def clean_windows(X, sfreq, max_bad_chans=0.2, zthresholds=[-3.5, 5],
 
     # determine which windows to remove
     if np.max(zthresholds) > 0:
-        mask1 = swz[-(np.int(max_bad_chans) + 1), :] > np.max(zthresholds)
+        mask1 = swz[-(int(max_bad_chans) + 1), :] > np.max(zthresholds)
     if np.min(zthresholds) < 0:
-        mask2 = (swz[1 + np.int(max_bad_chans - 1), :] < np.min(zthresholds))
+        mask2 = (swz[1 + int(max_bad_chans - 1), :] < np.min(zthresholds))
 
     # combine the two thresholds
     remove_mask = np.logical_or.reduce((mask1, mask2))
@@ -784,3 +267,192 @@ def clean_windows(X, sfreq, max_bad_chans=0.2, zthresholds=[-3.5, 5],
         sample_mask = np.ones((1, ns), dtype=bool)
 
     return clean, sample_mask
+
+
+def asr_process_optimized(data, sfreq, M, T, windowlen=0.5, lookahead=0.25,
+                          stepsize=32, maxdims=0.66, ab=None, R=None, Zi=None,
+                          cov=None, carry=None, return_states=False,
+                          method="euclid", mem_splits=3, n_jobs=1):
+    """Optimized ASR implementation with error fixes"""
+
+    # ===== 初始化验证 =====
+    if method != "euclid":
+        warnings.warn("Only Euclidean ASR supported", RuntimeWarning)
+
+    C, S = data.shape
+    maxdims = int(np.round(C * maxdims)) if maxdims < 1 else int(maxdims)
+
+    # ===== 滤波器状态初始化 =====
+    if Zi is None:
+        _, Zi = yulewalk_filter(data, ab=ab, sfreq=sfreq, zi=np.ones((C, 8)))
+
+    # ===== 数据缓冲处理 =====
+    P = int(np.round(lookahead * sfreq))
+    if carry is None:
+        if data.shape[1] < P:
+            pad_width = P - data.shape[1]
+            padded_data = np.pad(data, ((0, 0), (0, pad_width)), mode='reflect')
+            last_part = padded_data[:, -P:]
+        else:
+            last_part = data[:, -P:]
+        carry = 2 * data[:, [0]] - last_part  # 形状 (C, P)
+    data = np.concatenate([carry, data], axis=1)
+
+    # ===== 并行处理函数 =====
+    def process_window(Xcov_j, M, T, C, maxdims):
+        """处理单个窗口的并行函数"""
+        try:
+            # 确保输入协方差矩阵对称
+            Xcov_j = (Xcov_j + Xcov_j.T) / 2
+
+            # 特征分解
+            D, V = eigh(Xcov_j)
+
+            # 确定保留成分
+            keep_mask = np.logical_or(
+                D < np.sum((T @ V) ** 2, axis=0),
+                np.arange(C) < (C - maxdims)
+            )
+            keep_indices = np.where(keep_mask)[0]
+
+            # 强制至少保留1个成分
+            if len(keep_indices) == 0:
+                keep_indices = [0]
+            k = len(keep_indices)
+
+            # 提取特征向量 (C, k)
+            V_kept = V[:, keep_indices]
+
+            # 维度验证
+            assert V_kept.shape == (C, k), \
+                f"V_kept维度错误: {V_kept.shape} != {(C, k)}"
+
+            # 计算投影矩阵 (k, C)
+            A = V_kept.T @ M
+            assert A.shape == (k, C), \
+                f"A矩阵形状错误: {A.shape} != {(k, C)}"
+
+            # 计算伪逆 (C, k)
+            A_pinv = pinv(A, rcond=1e-6)
+            assert A_pinv.shape == (C, k), \
+                f"A_pinv形状错误: {A_pinv.shape} != {(C, k)}"
+
+            # 分步计算重建矩阵
+            R = M @ A_pinv @ V_kept.T @ V.T
+
+            # 最终维度验证
+            assert R.shape == (C, C), \
+                f"重建矩阵形状错误: {R.shape} != {(C, C)}"
+
+            return R.astype(np.float32), False
+
+        except np.linalg.LinAlgError as e:
+            print(f"线性代数错误: {str(e)}")
+            return np.eye(C, dtype=np.float32), True
+
+    # ===== 主处理循环 =====
+    last_trivial = False
+    last_R = np.eye(C, dtype=np.float32)
+
+    for i in range(mem_splits):
+        start = i * S // mem_splits
+        end = min((i + 1) * S // mem_splits, S)
+        i_range = slice(start + P, end + P)
+
+        # 带滤波处理
+        X, Zi = yulewalk_filter(data[:, i_range], sfreq=sfreq, ab=ab, zi=Zi)
+
+        # 协方差计算
+        X_3d = X[:, np.newaxis, :] * X[np.newaxis, :, :]
+        X_flat = X_3d.reshape(C * C, -1)
+        Xcov, cov = ma_filter_cumsum(int(windowlen * sfreq), X_flat, cov)
+
+        # 更新点处理
+        update_at = np.unique(np.clip(
+            np.arange(0, Xcov.shape[1], stepsize),
+            0, Xcov.shape[1] - 1
+        ))
+        Xcov_blocks = Xcov.reshape(C, C, -1)[:, :, update_at]
+
+        # 并行处理
+        if Parallel:
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(process_window)(Xcov_blocks[..., j], M, T, C, maxdims)
+                for j in range(Xcov_blocks.shape[-1])
+            )
+        else:
+            results = [process_window(Xcov_blocks[..., j], M, T, C, maxdims)
+                       for j in range(Xcov_blocks.shape[-1])]
+
+        # 应用重建
+        prev_idx = 0
+        for j, (R, trivial) in enumerate(results):
+            curr_idx = update_at[j] + 1
+            if curr_idx <= prev_idx:
+                continue
+
+            # 向量化混合操作
+            blend = (1 - np.cos(np.linspace(0, np.pi, curr_idx - prev_idx))) / 2
+            blend = blend.reshape(1, -1)
+
+            slice_range = slice(prev_idx + P, curr_idx + P)
+            data[:, slice_range] = (
+                    R @ data[:, slice_range] * blend +
+                    last_R @ data[:, slice_range] * (1 - blend)
+            ).astype(np.float32)
+
+            last_R, last_trivial = R, trivial
+            prev_idx = curr_idx
+
+    # 后处理部分修改为仅裁剪前端P个样本
+    P = int(np.round(lookahead * sfreq))
+    carry = data[:, -P:] if P > 0 else None  # 保存最后P个样本用于下次处理
+    clean_data = data[:, P:]  # 关键修改：仅移除前端P个样本
+
+    if return_states:
+        return clean_data, {"M": M, "T": T, "R": R, "Zi": Zi,
+                            "cov": cov, "carry": carry}
+    else:
+        return clean_data
+
+
+# ===== 缺失函数实现 =====
+def yulewalk_filter(X, sfreq, ab=None, zi=None, axis=-1):
+    """
+    Yule-Walker滤波器实现
+    参数：
+        X : 输入数据 (C, N)
+        ab : (A, B) 滤波器系数元组
+        zi : 初始条件
+    返回：
+        滤波后的数据和最终状态
+    """
+    if ab is None:
+        # 默认滤波器系数（示例值）
+        B = np.array([1.0, -2.0, 1.5, -0.8])
+        A = np.array([1.0, -1.5, 0.9, -0.2])
+    else:
+        A, B = ab
+
+    if zi is None:
+        zi = np.zeros((X.shape[0], max(len(A), len(B)) - 1))
+
+    # 简化的IIR滤波实现
+    X_filtered = np.zeros_like(X)
+    for ch in range(X.shape[0]):
+        x = X[ch, :]
+        y, zf = lfilter(B, A, x, zi=zi[ch])
+        X_filtered[ch, :] = y
+        zi[ch] = zf
+
+    return X_filtered.astype(np.float32), zi
+
+
+def ma_filter_cumsum(window_len, data, prev_cumsum=None):
+    """优化的移动平均滤波器"""
+    if prev_cumsum is None:
+        prev_cumsum = np.zeros((data.shape[0], 1), dtype=np.float32)
+
+    cumsum = np.hstack([prev_cumsum, np.cumsum(data, axis=1, dtype=np.float32)])
+    ma = (cumsum[:, window_len:] - cumsum[:, :-window_len]) / window_len
+    return ma.astype(np.float32), cumsum[:, -window_len + 1:]

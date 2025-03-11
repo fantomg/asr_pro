@@ -5,6 +5,8 @@
 """
 In asrpy.utils you can find utility functions required to perform ASR.
 """
+from typing import Any
+
 import numpy as np
 from scipy import signal
 from scipy.linalg import toeplitz
@@ -266,7 +268,7 @@ def yulewalk(order, F, M):
     _, Ss = 2 * np.real(signal.freqz(Qh, A, worN=n, whole=True))
 
     hh = np.fft.ifft(
-        np.exp(np.fft.fft(Rwindow * np.fft.ifft(np.log(Ss, dtype=np.complex))))  # noqa
+        np.exp(np.fft.fft(Rwindow * np.fft.ifft(np.log(Ss, dtype=complex))))  # noqa
     )
     B = np.real(numf(hh[0:nr], A, nb))
 
@@ -359,7 +361,7 @@ def ma_filter(N, X, Zi):
     return X, Zf
 
 
-def geometric_median(X, tol=1e-5, max_iter=500):
+def geometric_median(X: object, tol: object = 1e-5, max_iter: object = 500) -> Any:
     """Geometric median.
 
     This code is adapted from [2]_ using the Vardi and Zhang algorithm

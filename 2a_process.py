@@ -59,6 +59,8 @@ def process_2a(mne_raw, output_dir, eeg_file):
     output_dir (str): 输出目录
     eeg_file (str): EEG 数据文件名，用于生成输出文件名
     """
+
+    mne_raw.set_channel_types({'EOG-left': 'eog', 'EOG-central': 'eog', 'EOG-right': 'eog'})
     # 重命名通道，按照 10-20 系统重命名
     mne_raw.rename_channels({
         'EEG-Fz': 'Fz', 'EEG-0': 'FC3', 'EEG-1': 'FC1', 'EEG-2': 'FCz',
@@ -71,7 +73,6 @@ def process_2a(mne_raw, output_dir, eeg_file):
 
     montage = mne.channels.make_standard_montage('standard_1020')
     mne_raw.info.set_montage(montage, on_missing='ignore')
-    mne_raw.set_channel_types({'EOG-left': 'eog', 'EOG-central': 'eog', 'EOG-right': 'eog'})
 
     # Event ID 映射
     event_id = {
@@ -124,13 +125,13 @@ def process_2a(mne_raw, output_dir, eeg_file):
     output_filename = f"{file_base}_raw.fif"
     output_filepath = os.path.join(output_dir, output_filename)
     mne_raw.save(output_filepath, overwrite=True)
-
+    # print(mne_raw.info['ch_names'])
     print(f"处理并保存文件：{output_filename}")
 
 
 def main():
     # 设置包含脑电数据文件的目录路径
-    directory_path = './dataset/s9'
+    directory_path = './dataset/s8'
 
     try:
         # 获取所有 EEG 数据文件
