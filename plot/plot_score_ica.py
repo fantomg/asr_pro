@@ -68,7 +68,7 @@ if data_list:
     groups_present = df_bar["Channel Group"].unique().tolist()
 
     if len(groups_present) > 1:
-        fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(14, 3), sharex=True)
+        fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(7, 8), sharex=True)
         for ax, group in zip(axes, group_order):
             group_df = df_bar[df_bar["Channel Group"] == group].sort_values(by='Average_ica_score', ascending=False)
             if not group_df.empty:
@@ -84,7 +84,7 @@ if data_list:
 
                 ax.set_yticks(y_pos)
                 ax.set_yticklabels(group_df['Dataset'])
-                ax.set_title(f"Channel Group: {group}")
+                ax.set_title(f"Group by Channel Number:  {group}")
                 ax.set_xlabel("Artifact-Free Ratio")
                 ax.set_ylabel("Dataset")
 

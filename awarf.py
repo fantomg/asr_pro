@@ -6,7 +6,7 @@ from scipy import linalg
 from scipy.linalg import eigh
 import pywt
 
-from origin_asrpy_utils import ma_filter, block_covariance, geometric_median, fit_eeg_distribution
+from origin.origin_asrpy_utils import ma_filter, block_covariance, geometric_median, fit_eeg_distribution
 
 logging.basicConfig(level=logging.INFO)
 warnings.filterwarnings("ignore", category=np.ComplexWarning)
@@ -63,8 +63,8 @@ def clean_windows(X, sfreq, max_bad_chans=0.2, zthresholds=[-3.5, 5],
     return clean, sample_mask
 
 
-def asr_calibrate(X, sfreq, blocksize=100, win_len=0.5, win_overlap=0.66,
-                  max_dropout_fraction=0.1, min_clean_fraction=0.25):
+def awarf_calibrate(X, sfreq, blocksize=100, win_len=0.5, win_overlap=0.66,
+                    max_dropout_fraction=0.1, min_clean_fraction=0.25):
     """
     校准阶段：对清洁数据进行滤波、协方差计算、分布拟合，构造门限矩阵 T，
     并计算每个通道的基线 RMS 值用于后续自适应门控。
@@ -91,11 +91,11 @@ def asr_calibrate(X, sfreq, blocksize=100, win_len=0.5, win_overlap=0.66,
     return M, T, calib_rms
 
 
-def asr_process_optimized(data, sfreq, M, T, calib_rms, windowlen=0.5, lookahead=0.25,
-                          stepsize=32, maxdims=0.66, carry=None, return_states=False,
-                          mem_splits=3, auto_gate_factor=0.33):
+def awarf_process_optimized(data, sfreq, M, T, calib_rms, windowlen=0.5, lookahead=0.25,
+                            stepsize=32, maxdims=0.66, carry=None, return_states=False,
+                            mem_splits=3, auto_gate_factor=0.33):
     """
-    处理阶段：采用分段处理和并行窗口计算，对数据应用 ASR 修正，
+    处理阶段：采用分段处理和并行窗口计算，对数据应用 AWARF 修正，
     加入基于数据分布的自适应门控机制，当通道之间差异较小时跳过修正以节省计算时间。
 
     参数:
@@ -137,7 +137,7 @@ def asr_process_optimized(data, sfreq, M, T, calib_rms, windowlen=0.5, lookahead
     def should_skip_block(block):
         """
         计算当前块每个通道的 RMS 值，并求其变异系数（标准差/均值）。
-        如果变异系数低于 auto_gate_factor，则认为各通道之间差异较小，跳过 ASR 修正。
+        如果变异系数低于 auto_gate_factor，则认为各通道之间差异较小，跳过 AWARF 修正。
         """
         block_rms = np.sqrt(np.mean(block ** 2, axis=1))
         cv = np.std(block_rms) / np.mean(block_rms)
@@ -149,11 +149,11 @@ def asr_process_optimized(data, sfreq, M, T, calib_rms, windowlen=0.5, lookahead
         chunk = data[:, start + P: end + P]
 
         if should_skip_block(chunk):
-            # 如果块内各通道 RMS 变化很小，直接跳过 ASR 修正，使用原始数据
+            # 如果块内各通道 RMS 变化很小，直接跳过 AWARF 修正，使用原始数据
             processed = chunk
             states = {'carry': data[:, -P:]}
         else:
-            # 否则执行 ASR 修正
+            # 否则执行 AWARF 修正
             X = adaptive_wavelet_filter(chunk, wavelet='db4', level=None)
             X_3d = X[:, None] * X[None, :]
             X_flat = X_3d.reshape(C * C, -1)
@@ -185,7 +185,7 @@ def asr_process_optimized(data, sfreq, M, T, calib_rms, windowlen=0.5, lookahead
     return clean_data
 
 
-class ASR:
+class AWARF:
     def __init__(self, sfreq, blocksize=100, win_len=0.5, win_overlap=0.66,
                  max_dropout_fraction=0.1, min_clean_fraction=0.25,
                  max_bad_chans=0.1):
@@ -213,10 +213,10 @@ class ASR:
                                            max_bad_chans=self.max_bad_chans,
                                            min_clean_fraction=self.min_clean_fraction,
                                            max_dropout_fraction=self.max_dropout_fraction)
-        self.M, self.T, self.calib_rms = asr_calibrate(clean, sfreq=self.sfreq, blocksize=self.blocksize,
-                                                       win_len=self.win_len, win_overlap=self.win_overlap,
-                                                       max_dropout_fraction=self.max_dropout_fraction,
-                                                       min_clean_fraction=self.min_clean_fraction)
+        self.M, self.T, self.calib_rms = awarf_calibrate(clean, sfreq=self.sfreq, blocksize=self.blocksize,
+                                                         win_len=self.win_len, win_overlap=self.win_overlap,
+                                                         max_dropout_fraction=self.max_dropout_fraction,
+                                                         min_clean_fraction=self.min_clean_fraction)
         self._fitted = True
         if return_clean_window:
             return clean, sample_mask
@@ -232,11 +232,11 @@ class ASR:
         for start in range(0, N, 100):
             end = min(start + 100 + P, N + P)
             chunk = X_padded[:, start:end]
-            processed, states = asr_process_optimized(chunk, self.sfreq, self.M, self.T, self.calib_rms,
-                                                      windowlen=self.win_len, lookahead=lookahead,
-                                                      stepsize=stepsize, maxdims=maxdims,
-                                                      carry=self.carry,
-                                                      return_states=True, mem_splits=mem_splits)
+            processed, states = awarf_process_optimized(chunk, self.sfreq, self.M, self.T, self.calib_rms,
+                                                        windowlen=self.win_len, lookahead=lookahead,
+                                                        stepsize=stepsize, maxdims=maxdims,
+                                                        carry=self.carry,
+                                                        return_states=True, mem_splits=mem_splits)
             output_start = start
             output_end = min(output_start + 100, N)
             X_processed[:, output_start:output_end] = processed[:, :output_end - output_start]

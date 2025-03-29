@@ -1,7 +1,5 @@
 import time
 
-import asrpy
-
 import asr_pro1
 
 import mne
@@ -11,8 +9,8 @@ from plot.waveform import plot_evoked_joint
 matplotlib.use('TkAgg')  # 显式设置 TkAgg 后端
 
 # 输入的原始 EEG 数据文件路径
-input_file = './BCICIV_2a_labeled/A04E_raw.fif'
-output_file = './clean/A04E_pro_eeg.fif'
+input_file = '../BCICIV_2a_labeled/A04E_raw.fif'
+output_file = '../clean/A04E_pro_eeg.fif'
 
 
 def apply_asr(raw_data):
@@ -51,7 +49,7 @@ def main():
     events, events_id = mne.events_from_annotations(raw)
 
     # 创建 Epochs 对象，选取部分通道进行分析
-    epochs = mne.Epochs(raw, events, events_id, tmin=2, tmax=5.9,
+    epochs = mne.Epochs(raw, events, events_id, tmin=2, tmax=6,
                         proj=True, baseline=None, preload=True,
                         picks=channel_names, event_repeated='drop')
 
@@ -63,7 +61,7 @@ def main():
     # 重新获取事件并构建去伪影后的 Epochs 对象
     events_clean, events_id_clean = mne.events_from_annotations(raw_cleaned)
     cleaned_epochs = mne.Epochs(raw_cleaned, events_clean, events_id_clean,
-                                tmin=2, tmax=5.9, proj=True, baseline=None,
+                                tmin=2, tmax=6, proj=True, baseline=None,
                                 preload=True, picks=channel_names, event_repeated="drop")
 
     # 绘制去伪影前后数据对比

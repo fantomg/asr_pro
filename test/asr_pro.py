@@ -1,13 +1,11 @@
 import logging
-import warnings
 
-import numpy as np
 from numpy.linalg import pinv
 from scipy import linalg
 from scipy.signal import lfilter
 
-from origin_asrpy_utils import (geometric_median, fit_eeg_distribution, yulewalk,
-                                yulewalk_filter, ma_filter, block_covariance)
+from origin.origin_asrpy_utils import (geometric_median, fit_eeg_distribution, yulewalk,
+                                       yulewalk_filter, block_covariance)
 import numpy as np
 from scipy.linalg import pinv, eigh
 import warnings
